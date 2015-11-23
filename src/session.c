@@ -2286,7 +2286,12 @@ malformed_msg:
 		}
 		nc_reply_free(reply);
 	}
-
+	reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
+  	if (nc_session_send_reply(session, NULL, reply) == 0) {
+        ERROR("Unable to send the \'Malformed message\' reply");
+        nc_session_close(session, NC_SESSION_TERM_OTHER);
+        return (NC_MSG_UNKNOWN);
+  	}
 	ERROR("Malformed message received, closing the session %s.", session->session_id);
 	nc_session_close(session, NC_SESSION_TERM_OTHER);
 
