@@ -88,7 +88,7 @@
 #endif
 
 static const char rcsid[] __attribute__((used)) ="$Id: "__FILE__": "RCSID" $";
-
+  
 /* definition in datastore.c */
 char** get_schemas_capabilities(struct nc_cpblts *cpblts);
 
@@ -295,6 +295,17 @@ int nc_session_is_monitored(const char* session_id)
 
 	return 0;
 }
+API void print_dbg(int n)
+{
+  DBG("print dbg output %d",n);
+}
+
+API unsigned long get_last_session()
+{
+  DBG("%lu",nc_info->last_session_id);
+ return nc_info->last_session_id; 
+}
+
 
 API int nc_session_monitor(struct nc_session* session)
 {
@@ -449,11 +460,11 @@ API int nc_session_monitor(struct nc_session* session)
 		free(session->stats);
 	}
 	session->stats = &(litem->stats);
-	strncpy(litem->login_time, (session->logintime == NULL) ? "0000-01-01T00:00:00Z" : session->logintime, TIME_LENGTH);
+	strncpy(litem->login_time, (session->logintime == NULL) ? "" : session->logintime, TIME_LENGTH);
 	litem->login_time[TIME_LENGTH - 1] = 0; /* terminating null byte */
 
-	strcpy(litem->data, (session->username == NULL) ? "UNKNOWN" : session->username);
-	strcpy(litem->data + 1 + strlen(litem->data), (session->hostname == NULL) ? "UNKNOWN" : session->hostname);
+	strcpy(litem->data, (session->username == NULL) ? "" : session->username);
+	strcpy(litem->data + 1 + strlen(litem->data), (session->hostname == NULL) ? "" : session->hostname);
 
 	pthread_rwlockattr_init(&rwlockattr);
 	pthread_rwlockattr_setpshared(&rwlockattr, PTHREAD_PROCESS_SHARED);
@@ -1066,6 +1077,95 @@ void parse_wdcap(struct nc_cpblts *capabilities, NCWD_MODE *basic, int *supporte
 	}
 }
 
+API struct nc_session* nc_session_dummy_k(const char* username, const char* hostname, struct nc_cpblts *capabilities)
+{
+	struct nc_session * session;
+	struct passwd* p;
+	const char* cpblt;
+  /*unsigned long last_sid = get_last_session()+1;
+  DBG("%lu",last_sid);
+  char* sid = (char*)&last_sid;*/
+  //snprintf(sid,sizeof(sid),"%lu",last_sid);
+  //nc_verb_verbose(sid);
+/*	if (sid == NULL || username == NULL || capabilities == NULL) {
+		return NULL;
+	}*/
+char* sid="40";
+	if ((session = malloc (sizeof (struct nc_session))) == NULL) {
+		ERROR("Memory allocation failed (%s)", strerror(errno));
+		return NULL;
+	}
+	memset (session, 0, sizeof (struct nc_session));
+	if ((session->stats = malloc (sizeof (struct nc_session_stats))) == NULL) {
+		ERROR("Memory allocation failed (%s)", strerror(errno));
+		free(session);
+		return NULL;
+	}
+
+	/* do not send <close-session> on nc_session_close() */
+	session->is_server = 1;
+
+	/* set invalid fd values to prevent comunication */
+	session->fd_input = -1;
+	session->fd_output = -1;
+	session->transport_socket = -1;
+
+	/* init stats values */
+	session->logintime = nc_time2datetime(time(NULL), NULL);session->monitored = 0;
+	session->stats->in_rpcs = 0;
+	session->stats->in_bad_rpcs = 0;
+	session->stats->out_rpc_errors = 0;
+	session->stats->out_notifications = 0;
+
+	/*
+	 * mutexes and queues fields are not initialized since dummy session
+	 * cannot send or receive any data
+	 */
+
+	/* session is DUMMY */
+	session->status = NC_SESSION_STATUS_DUMMY;
+	/* copy session id */
+	strncpy (session->session_id, sid, SID_SIZE);
+	/* get system groups for the username */
+	session->groups = nc_get_grouplist(username);
+	/* if specified, copy hostname */
+	if (hostname != NULL) {
+		session->hostname = strdup (hostname);
+	}
+	/* copy user name */
+	session->username = strdup (username);
+	/* detect if user ID is 0 -> then the session is recovery */
+	session->nacm_recovery = 0;
+	if ((p = getpwnam(username)) != NULL) {
+		if (p->pw_uid == NACM_RECOVERY_UID) {
+			session->nacm_recovery = 1;
+		}
+	}
+	/* create empty capabilities list */
+	session->capabilities = nc_cpblts_new (NULL);
+	/* initialize capabilities iterator */
+	nc_cpblts_iter_start (capabilities);
+	/* copy all capabilities */
+	while ((cpblt = nc_cpblts_iter_next (capabilities)) != NULL) {
+		nc_cpblts_add (session->capabilities, cpblt);
+	}
+
+	session->wd_basic = NCWD_MODE_NOTSET;
+	session->wd_modes = 0;
+	/* set with defaults capability flags */
+	parse_wdcap(session->capabilities, &(session->wd_basic), &(session->wd_modes));
+
+	if (p) {
+		VERB("Created dummy session %s for user \'%s\' (UID %d)%s",
+			session->session_id,
+			session->username,
+			p->pw_uid,
+			session->nacm_recovery ? " - recovery session" : "");
+	}
+
+	return session;
+}
+
 API struct nc_session* nc_session_dummy(const char* sid, const char* username, const char* hostname, struct nc_cpblts *capabilities)
 {
 	struct nc_session * session;
@@ -1666,25 +1766,15 @@ static int nc_session_read_len(struct nc_session* session, size_t chunk_length, 
 		if (session->tls) {
 			/* read via OpenSSL */
 			c = SSL_read(session->tls, &(buf[rd]), chunk_length - rd);
-			if (c <= 0 && (r = SSL_get_error(session->tls, c))) {
+			if (c < 0 && (r = SSL_get_error(session->tls, c))) {
 				if (r == SSL_ERROR_WANT_READ) {
 					usleep(NC_READ_SLEEP);
 					continue;
 				} else {
-					if (r == SSL_ERROR_SYSCALL) {
-						ERROR("Reading from the TLS session failed (%s)", strerror(errno));
-					} else if (r == SSL_ERROR_SSL) {
-						ERROR("Reading from the TLS session failed (%s)", ERR_error_string(r, NULL));
-					} else {
-						ERROR("Reading from the TLS session failed (SSL code %d)", r);
-					}
+					ERROR("Reading from the TLS session failed (%d: %s)", r);
 					free (buf);
-					if (len != NULL) {
-						*len = 0;
-					}
-					if (text != NULL) {
-						*text = NULL;
-					}
+					*len = 0;
+					*text = NULL;
 					return (EXIT_FAILURE);
 				}
 			}
@@ -1800,7 +1890,7 @@ static int nc_session_read_until(struct nc_session* session, const char* endtag,
 		if (session->tls) {
 			/* read via OpenSSL */
 			c = SSL_read(session->tls, &(buf[rd]), 1);
-			if (c <= 0 && (r = SSL_get_error(session->tls, c))) {
+			if (c < 0 && (r = SSL_get_error(session->tls, c))) {
 				if (r == SSL_ERROR_WANT_READ) {
 					usleep(NC_READ_SLEEP);
 					continue;
@@ -1947,7 +2037,7 @@ const nc_msgid nc_msg_parse_msgid(const struct nc_msg *msg)
 	return (ret);
 }
 
-static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, struct nc_msg** msg)
+static NC_MSG_TYPE nc_session_receive_k(struct nc_session* session, int timeout, struct nc_msg** msg)
 {
 	struct nc_msg *retval;
 	nc_reply* reply;
@@ -1962,31 +2052,36 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 	unsigned long int revents;
 	NC_MSG_TYPE msgtype;
 	xmlNodePtr root;
+  nc_verb_verbose(nc_rpc_dump(*msg));
+  text=nc_rpc_dump(*msg);
+  nc_verb_verbose(text);
 
-	if (session == NULL || (session->status != NC_SESSION_STATUS_WORKING && session->status != NC_SESSION_STATUS_CLOSING)) {
+/*	if (session == NULL || (session->status != NC_SESSION_STATUS_WORKING && session->status != NC_SESSION_STATUS_CLOSING)) {
 		ERROR("Invalid session to receive data.");
 		return (NC_MSG_UNKNOWN);
-	}
+	}*/
 
 	/* if there is waiting sending thread, sleep for timeout and return
 	 * with NC_MSG_WOULDBLOCK because we probably relock the mut_channel quite
 	 * fast, so we are trying to avoid starvation this way
 	 */
+  /*
 	if (session->mut_channel_flag) {
 		usleep(timeout ? timeout : 1);
 		return (NC_MSG_WOULDBLOCK);
-	}
+	}*/
 
-	/* lock the session for receiving */
+	// lock the session for receiving 
+/*
 	DBG_LOCK("mut_channel");
 	pthread_mutex_lock(session->mut_channel);
 
-	/* use while for possibility of repeating test */
+	// use while for possibility of repeating test 
 	while(1) {
 		revents = 0;
 #ifndef DISABLE_LIBSSH
 		if (session->ssh_chan != NULL) {
-			/* we are getting data from libssh's channel */
+			// we are getting data from libssh's channel 
 			status = ssh_channel_poll_timeout(session->ssh_chan, timeout, 0);
 			if (status > 0) {
 				revents = POLLIN;
@@ -1995,7 +2090,7 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 #endif
 #ifdef ENABLE_TLS
 		if (session->tls != NULL) {
-			/* we are getting data from TLS session using OpenSSL */
+			// we are getting data from TLS session using OpenSSL
 			fds.fd = SSL_get_fd(session->tls);
 			fds.events = POLLIN;
 			fds.revents = 0;
@@ -2005,7 +2100,7 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 		} else
 #endif
 		if (session->fd_input != -1) {
-			/* we are getting data from standard file descriptor */
+			// we are getting data from standard file descriptor 
 			fds.fd = session->fd_input;
 			fds.events = POLLIN;
 			fds.revents = 0;
@@ -2017,9 +2112,9 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 			return (NC_MSG_UNKNOWN);
 		}
 
-		/* process the result */
+		// process the result
 		if (status == 0) {
-			/* timed out */
+			// timed out
 			DBG_UNLOCK("mut_channel");
 			pthread_mutex_unlock(session->mut_channel);
 			return (NC_MSG_WOULDBLOCK);
@@ -2028,10 +2123,10 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 				|| (status == SSH_AGAIN)
 #endif
 				) {
-			/* poll was interrupted */
+			// poll was interrupted 
 			continue;
 		} else if (status < 0) {
-			/* poll failed - something wrong happend, close this socket and wait for another request */
+			// poll failed - something wrong happend, close this socket and wait for another request 
 			DBG_UNLOCK("mut_channel");
 			pthread_mutex_unlock(session->mut_channel);
 #ifndef DISABLE_LIBSSH
@@ -2057,11 +2152,11 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 			return (NC_MSG_UNKNOWN);
 
 		}
-		/* status > 0 */
-		/* check the status of the socket */
-		/* if nothing to read and POLLHUP (EOF) or POLLERR set */
+		// status > 0 
+		// check the status of the socket
+		// if nothing to read and POLLHUP (EOF) or POLLERR set 
 		if ((revents & POLLHUP) || (revents & POLLERR)) {
-			/* close client's socket (it's probably already closed by client */
+			// close client's socket (it's probably already closed by client
 			DBG_UNLOCK("mut_channel");
 			pthread_mutex_unlock(session->mut_channel);
 			ERROR("Input channel closed");
@@ -2074,10 +2169,10 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 			return (NC_MSG_UNKNOWN);
 		}
 
-		/* we have something to read */
+		// we have something to read 
 		break;
-	}
-
+	}*/
+/*
 	switch (session->version) {
 	case NETCONFV10:
 		if (nc_session_read_until (session, NC_V10_END_MSG, 0, &text, &len) != 0) {
@@ -2101,33 +2196,33 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 				goto malformed_msg_channels_unlock;
 			}
 			if (strcmp (chunk, "#\n") == 0) {
-				/* end of chunked framing message */
+				// end of chunked framing message
 				free (chunk);
 				break;
-			}
+			}*/
 
 			/* convert string to the size of the following chunk */
-			chunk_length = strtoul (chunk, (char **) NULL, 10);
+/*			chunk_length = strtoul (chunk, (char **) NULL, 10);
 			if (chunk_length == 0) {
 				ERROR("Invalid frame chunk size detected, fatal error.");
 				goto malformed_msg_channels_unlock;
 			}
 			free (chunk);
 			chunk = NULL;
-
+*/
 			/* now we have size of next chunk, so read the chunk */
-			if (nc_session_read_len (session, chunk_length, &chunk, &len) != 0) {
+/*  		if (nc_session_read_len (session, chunk_length, &chunk, &len) != 0) {
 				if (total_len > 0) {
 					free (text);
 				}
 				goto malformed_msg_channels_unlock;
 			}
-
+*/
 			/*
 			 * realloc resulting text buffer if needed (always needed now)
 			 * don't forget count terminating null byte
 			 * */
-			if (text_size < (total_len + len + 1)) {
+/*			if (text_size < (total_len + len + 1)) {
 				char *tmp = realloc (text, total_len + len + 1);
 				if (tmp == NULL) {
 					ERROR("Memory reallocation failed (%s:%d).", __FILE__, __LINE__);
@@ -2154,7 +2249,7 @@ static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, s
 	}
 
 	DBG_UNLOCK("mut_channel");
-	pthread_mutex_unlock(session->mut_channel);
+	pthread_mutex_unlock(session->mut_channel);*/
 
 	if (text == NULL) {
 		ERROR("Empty message received (session %s)", session->session_id);
@@ -2286,15 +2381,369 @@ malformed_msg:
 		}
 		nc_reply_free(reply);
 	}
-	reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
-  	if (nc_session_send_reply(session, NULL, reply) == 0) {
+  reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
+  if (nc_session_send_reply(session, NULL, reply) == 0) {
         ERROR("Unable to send the \'Malformed message\' reply");
-        nc_session_close(session, NC_SESSION_TERM_OTHER);
+  //      nc_session_close(session, NC_SESSION_TERM_OTHER);
         return (NC_MSG_UNKNOWN);
-  	}
+  }
 	ERROR("Malformed message received, closing the session %s.", session->session_id);
-	nc_session_close(session, NC_SESSION_TERM_OTHER);
+	//nc_session_close(session, NC_SESSION_TERM_OTHER);
+	return (NC_MSG_UNKNOWN);
+}
 
+static NC_MSG_TYPE nc_session_receive(struct nc_session* session, int timeout, struct nc_msg** msg)
+{
+	struct nc_msg *retval;
+	nc_reply* reply;
+	const char* id;
+	const char *emsg;
+	char *text = NULL, *tmp_text, *chunk = NULL;
+	size_t len;
+	unsigned long long int text_size = 0, total_len = 0;
+	size_t chunk_length;
+	struct pollfd fds;
+	int status;
+	unsigned long int revents;
+	NC_MSG_TYPE msgtype;
+	xmlNodePtr root;
+  nc_verb_verbose(nc_rpc_dump(*msg));
+  text=nc_rpc_dump(*msg);
+  nc_verb_verbose(text);
+/*
+	if (session == NULL || (session->status != NC_SESSION_STATUS_WORKING && session->status != NC_SESSION_STATUS_CLOSING)) {
+		ERROR("Invalid session to receive data.");
+		return (NC_MSG_UNKNOWN);
+	}*/
+
+	/* if there is waiting sending thread, sleep for timeout and return
+	 * with NC_MSG_WOULDBLOCK because we probably relock the mut_channel quite
+	 * fast, so we are trying to avoid starvation this way
+	 */
+  /*
+	if (session->mut_channel_flag) {
+		usleep(timeout ? timeout : 1);
+		return (NC_MSG_WOULDBLOCK);
+	}*/
+
+	// lock the session for receiving 
+/*
+	DBG_LOCK("mut_channel");
+	pthread_mutex_lock(session->mut_channel);
+
+	// use while for possibility of repeating test 
+	while(1) {
+		revents = 0;
+#ifndef DISABLE_LIBSSH
+		if (session->ssh_chan != NULL) {
+			// we are getting data from libssh's channel 
+			status = ssh_channel_poll_timeout(session->ssh_chan, timeout, 0);
+			if (status > 0) {
+				revents = POLLIN;
+			}
+		} else
+#endif
+#ifdef ENABLE_TLS
+		if (session->tls != NULL) {
+			// we are getting data from TLS session using OpenSSL
+			fds.fd = SSL_get_fd(session->tls);
+			fds.events = POLLIN;
+			fds.revents = 0;
+			status = poll(&fds, 1, timeout);
+
+			revents = (unsigned long int) fds.revents;
+		} else
+#endif
+		if (session->fd_input != -1) {
+			// we are getting data from standard file descriptor 
+			fds.fd = session->fd_input;
+			fds.events = POLLIN;
+			fds.revents = 0;
+			status = poll(&fds, 1, timeout);
+
+			revents = (unsigned long int) fds.revents;
+		} else {
+			ERROR("Invalid session to receive data.");
+			return (NC_MSG_UNKNOWN);
+		}
+
+		// process the result
+		if (status == 0) {
+			// timed out
+			DBG_UNLOCK("mut_channel");
+			pthread_mutex_unlock(session->mut_channel);
+			return (NC_MSG_WOULDBLOCK);
+		} else if (((status == -1) && (errno == EINTR))
+#ifndef DISABLE_LIBSSH
+				|| (status == SSH_AGAIN)
+#endif
+				) {
+			// poll was interrupted 
+			continue;
+		} else if (status < 0) {
+			// poll failed - something wrong happend, close this socket and wait for another request 
+			DBG_UNLOCK("mut_channel");
+			pthread_mutex_unlock(session->mut_channel);
+#ifndef DISABLE_LIBSSH
+			if (status == SSH_EOF) {
+				emsg = "end of file";
+			} else if (!session->ssh_chan) {
+				emsg = strerror(errno);
+			} else if (session->ssh_sess) {
+				emsg = ssh_get_error(session->ssh_sess);
+			} else {
+				emsg = "description not available";
+			}
+#else
+			emsg = strerror(errno);
+#endif
+			ERROR("Input channel error (%s)", emsg);
+			nc_session_close(session, NC_SESSION_TERM_DROPPED);
+			if (nc_info) {
+				pthread_rwlock_wrlock(&(nc_info->lock));
+				nc_info->stats.sessions_dropped++;
+				pthread_rwlock_unlock(&(nc_info->lock));
+			}
+			return (NC_MSG_UNKNOWN);
+
+		}
+		// status > 0 
+		// check the status of the socket
+		// if nothing to read and POLLHUP (EOF) or POLLERR set 
+		if ((revents & POLLHUP) || (revents & POLLERR)) {
+			// close client's socket (it's probably already closed by client
+			DBG_UNLOCK("mut_channel");
+			pthread_mutex_unlock(session->mut_channel);
+			ERROR("Input channel closed");
+			nc_session_close(session, NC_SESSION_TERM_DROPPED);
+			if (nc_info) {
+				pthread_rwlock_wrlock(&(nc_info->lock));
+				nc_info->stats.sessions_dropped++;
+				pthread_rwlock_unlock(&(nc_info->lock));
+			}
+			return (NC_MSG_UNKNOWN);
+		}
+
+		// we have something to read 
+		break;
+	}*/
+/*
+	switch (session->version) {
+	case NETCONFV10:
+		if (nc_session_read_until (session, NC_V10_END_MSG, 0, &text, &len) != 0) {
+			goto malformed_msg_channels_unlock;
+		}
+		text[len - strlen (NC_V10_END_MSG)] = 0;
+		DBG("Received message (session %s): %s", session->session_id, text);
+		break;
+	case NETCONFV11:
+		do {
+			if (nc_session_read_until (session, "\n#", 2, NULL, NULL) != 0) {
+				if (total_len > 0) {
+					free (text);
+				}
+				goto malformed_msg_channels_unlock;
+			}
+			if (nc_session_read_until (session, "\n", 0, &chunk, &len) != 0) {
+				if (total_len > 0) {
+					free (text);
+				}
+				goto malformed_msg_channels_unlock;
+			}
+			if (strcmp (chunk, "#\n") == 0) {
+				// end of chunked framing message
+				free (chunk);
+				break;
+			}*/
+
+			/* convert string to the size of the following chunk */
+/*			chunk_length = strtoul (chunk, (char **) NULL, 10);
+			if (chunk_length == 0) {
+				ERROR("Invalid frame chunk size detected, fatal error.");
+				goto malformed_msg_channels_unlock;
+			}
+			free (chunk);
+			chunk = NULL;
+*/
+			/* now we have size of next chunk, so read the chunk */
+/*  		if (nc_session_read_len (session, chunk_length, &chunk, &len) != 0) {
+				if (total_len > 0) {
+					free (text);
+				}
+				goto malformed_msg_channels_unlock;
+			}
+*/
+			/*
+			 * realloc resulting text buffer if needed (always needed now)
+			 * don't forget count terminating null byte
+			 * */
+/*			if (text_size < (total_len + len + 1)) {
+				char *tmp = realloc (text, total_len + len + 1);
+				if (tmp == NULL) {
+					ERROR("Memory reallocation failed (%s:%d).", __FILE__, __LINE__);
+					free(text);
+					goto malformed_msg_channels_unlock;
+				}
+				text = tmp;
+				text[total_len] = '\0';
+				text_size = total_len + len + 1;
+			}
+			memcpy(text + total_len, chunk, len);
+			total_len += len;
+			text[total_len] = '\0';
+			free (chunk);
+			chunk = NULL;
+
+		} while (1);
+		DBG("Received message (session %s): %s", session->session_id, text);
+		break;
+	default:
+		ERROR("Unsupported NETCONF protocol version (%d)", session->version);
+		goto malformed_msg_channels_unlock;
+		break;
+	}
+
+	DBG_UNLOCK("mut_channel");
+	pthread_mutex_unlock(session->mut_channel);*/
+
+	if (text == NULL) {
+		ERROR("Empty message received (session %s)", session->session_id);
+		goto malformed_msg;
+	}
+
+	retval = calloc (1, sizeof(struct nc_msg));
+	if (retval == NULL) {
+		ERROR("Memory reallocation failed (%s:%d).", __FILE__, __LINE__);
+		free (text);
+		goto malformed_msg;
+	}
+
+	/* skip leading whitespaces */
+	tmp_text=text;
+	while (isspace(*tmp_text)) {
+		tmp_text++;
+	}
+	/* store the received message in libxml2 format */
+	retval->doc = xmlReadDoc (BAD_CAST tmp_text, NULL, NULL, NC_XMLREAD_OPTIONS);
+	if (retval->doc == NULL) {
+		free (retval);
+		free (text);
+		ERROR("Invalid XML data received.");
+		goto malformed_msg;
+	}
+	free (text);
+
+	/* create xpath evaluation context */
+	if ((retval->ctxt = xmlXPathNewContext(retval->doc)) == NULL) {
+		ERROR("%s: rpc message XPath context cannot be created.", __func__);
+		nc_msg_free(retval);
+		goto malformed_msg;
+	}
+
+	/* register base namespace for the rpc */
+	if (xmlXPathRegisterNs(retval->ctxt, BAD_CAST NC_NS_BASE10_ID, BAD_CAST NC_NS_BASE10) != 0) {
+		ERROR("Registering base namespace for the message xpath context failed.");
+		nc_msg_free(retval);
+		goto malformed_msg;
+	}
+	if (xmlXPathRegisterNs(retval->ctxt, BAD_CAST NC_NS_NOTIFICATIONS_ID, BAD_CAST NC_NS_NOTIFICATIONS) != 0) {
+		ERROR("Registering notifications namespace for the message xpath context failed.");
+		nc_msg_free(retval);
+		goto malformed_msg;
+	}
+	if (xmlXPathRegisterNs(retval->ctxt, BAD_CAST NC_NS_WITHDEFAULTS_ID, BAD_CAST NC_NS_WITHDEFAULTS) != 0) {
+		ERROR("Registering with-defaults namespace for the message xpath context failed.");
+		nc_msg_free(retval);
+		goto malformed_msg;
+	}
+	if (xmlXPathRegisterNs(retval->ctxt, BAD_CAST NC_NS_MONITORING_ID, BAD_CAST NC_NS_MONITORING) != 0) {
+		ERROR("Registering monitoring namespace for the message xpath context failed.");
+		nc_msg_free(retval);
+		goto malformed_msg;
+	}
+
+	/* parse and store message type */
+	root = xmlDocGetRootElement(retval->doc);
+	/* check namespace */
+	if (!root->ns || !root->ns->href || xmlStrcmp(root->ns->href, BAD_CAST NC_NS_BASE10)) {
+		/* event notification ? */
+		if (root->ns && root->ns->href && !xmlStrcmp(root->ns->href, BAD_CAST NC_NS_NOTIFICATIONS) &&
+				!xmlStrcmp(root->name, BAD_CAST "notification")) {
+			/* we have notification */
+			msgtype = NC_MSG_NOTIFICATION;
+		} else {
+			/* bad namespace */
+			WARN("Unknown (unsupported) namespace of the received message root element.");
+			retval->type.rpc = NC_RPC_UNKNOWN;
+			msgtype = NC_MSG_UNKNOWN;
+		}
+
+	} else 	if (xmlStrcmp (root->name, BAD_CAST "rpc-reply") == 0) {
+		msgtype = NC_MSG_REPLY;
+
+		/* set reply type flag */
+		nc_reply_parse_type(retval);
+
+	} else if (xmlStrcmp (root->name, BAD_CAST "rpc") == 0) {
+		msgtype = NC_MSG_RPC;
+
+		/* set with-defaults if any */
+		nc_rpc_parse_withdefaults(retval, NULL);
+	} else if (xmlStrcmp (root->name, BAD_CAST "hello") == 0) {
+		/* set message type, we have <hello> message */
+		retval->type.reply = NC_REPLY_HELLO;
+		msgtype = NC_MSG_HELLO;
+	} else {
+		WARN("Unknown (unsupported) type of received message detected.");
+		retval->type.rpc = NC_RPC_UNKNOWN;
+		msgtype = NC_MSG_UNKNOWN;
+	}
+
+	if (msgtype == NC_MSG_RPC || msgtype == NC_MSG_REPLY) {
+		/* parse and store message-id */
+		if ((id = nc_msg_parse_msgid(retval)) == NULL) {
+			retval->msgid = NULL;
+		} else {
+			retval->msgid = strdup(id);
+		}
+	} else {
+		retval->msgid = NULL;
+	}
+
+	/* return the result */
+	*msg = retval;
+	(*msg)->session = session;
+	return (msgtype);
+
+malformed_msg_channels_unlock:
+	DBG_UNLOCK("mut_channel");
+	pthread_mutex_unlock(session->mut_channel);
+
+malformed_msg:
+	if (session->version == NETCONFV11 && session->ssh_sess == NULL) {
+		/* NETCONF version 1.1 define sending error reply from the server */
+		reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
+		if (reply == NULL) {
+			ERROR("Unable to create the \'Malformed message\' reply");
+			nc_session_close(session, NC_SESSION_TERM_OTHER);
+			return (NC_MSG_UNKNOWN);
+		}
+
+		if (nc_session_send_reply(session, NULL, reply) == 0) {
+			ERROR("Unable to send the \'Malformed message\' reply");
+			nc_session_close(session, NC_SESSION_TERM_OTHER);
+			return (NC_MSG_UNKNOWN);
+		}
+		nc_reply_free(reply);
+	}
+  reply = nc_reply_error(nc_err_new(NC_ERR_MALFORMED_MSG));
+  if (nc_session_send_reply(session, NULL, reply) == 0) {
+        ERROR("Unable to send the \'Malformed message\' reply");
+  //      nc_session_close(session, NC_SESSION_TERM_OTHER);
+        return (NC_MSG_UNKNOWN);
+  }
+	ERROR("Malformed message received, closing the session %s.", session->session_id);
+	//nc_session_close(session, NC_SESSION_TERM_OTHER);
 	return (NC_MSG_UNKNOWN);
 }
 
@@ -2520,6 +2969,183 @@ try_again:
 	return (ret);
 }
 
+#define LOCAL_RECEIVE_TIMEOUT1 100
+API NC_MSG_TYPE nc_session_recv_rpc_k(struct nc_session* session, int timeout, nc_rpc** rpc)
+{
+	NC_MSG_TYPE ret;
+	NC_OP op;
+	struct nc_err* e = NULL;
+	nc_reply* reply;
+	unsigned int *counter = NULL;
+
+	/* use local timeout to avoid continual long time blocking */
+	int local_timeout;
+
+	if (timeout == 0) {
+		local_timeout = 0;
+	} else {
+		local_timeout = LOCAL_RECEIVE_TIMEOUT1;
+	}
+
+try_again:
+	ret = nc_session_receive_k(session, local_timeout, (struct nc_msg**) rpc);
+  DBG("%d",ret);
+  DBG("%d",nc_rpc_get_op(rpc));
+
+  switch (ret) {
+	case NC_MSG_RPC:
+		(*rpc)->with_defaults = nc_rpc_parse_withdefaults(*rpc, session);
+
+		/* check for with-defaults capability */
+		if ((*rpc)->with_defaults != NCWD_MODE_NOTSET) {
+			/* check if the session support this */
+			if (session->wd_basic == NCWD_MODE_NOTSET) {
+				ERROR("rpc requires the with-defaults capability, but the session does not support it.");
+				e = nc_err_new(NC_ERR_INVALID_VALUE);
+				nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+				nc_err_set(e, NC_ERR_PARAM_MSG, "rpc requires the with-defaults capability, but the session does not support it.");
+			} else {
+				switch ((*rpc)->with_defaults) {
+				case NCWD_MODE_ALL:
+					if ((session->wd_modes & NCWD_MODE_ALL) == 0) {
+						ERROR("rpc requires the with-defaults capability report-all mode, but the session does not support it.");
+						e = nc_err_new(NC_ERR_INVALID_VALUE);
+						nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+						nc_err_set(e, NC_ERR_PARAM_MSG, "rpc requires the with-defaults capability report-all mode, but the session does not support it.");
+					}
+					break;
+				case NCWD_MODE_ALL_TAGGED:
+					if ((session->wd_modes & NCWD_MODE_ALL_TAGGED) == 0) {
+						ERROR("rpc requires the with-defaults capability report-all-tagged mode, but the session does not support it.");
+						e = nc_err_new(NC_ERR_INVALID_VALUE);
+						nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+						nc_err_set(e, NC_ERR_PARAM_MSG, "rpc requires the with-defaults capability report-all-tagged mode, but the session does not support it.");
+					}
+					break;
+				case NCWD_MODE_TRIM:
+					if ((session->wd_modes & NCWD_MODE_TRIM) == 0) {
+						ERROR("rpc requires the with-defaults capability trim mode, but the session does not support it.");
+						e = nc_err_new(NC_ERR_INVALID_VALUE);
+						nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+						nc_err_set(e, NC_ERR_PARAM_MSG, "rpc the requires with-defaults capability trim mode, but the session does not support it.");
+					}
+					break;
+				case NCWD_MODE_EXPLICIT:
+					if ((session->wd_modes & NCWD_MODE_EXPLICIT) == 0) {
+						ERROR("rpc requires the with-defaults capability explicit mode, but the session does not support it.");
+						e = nc_err_new(NC_ERR_INVALID_VALUE);
+						nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+						nc_err_set(e, NC_ERR_PARAM_MSG, "rpc requires the with-defaults capability explicit mode, but the session does not support it.");
+					}
+					break;
+				default: /* something weird */
+					ERROR("rpc requires the with-defaults capability with an unknown mode.");
+					e = nc_err_new(NC_ERR_INVALID_VALUE);
+					nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "with-defaults");
+					nc_err_set(e, NC_ERR_PARAM_MSG, "rpc requires the with-defaults capability with an unknown mode.");
+					break;
+				}
+			}
+
+			if (e != NULL) {
+				counter = &nc_info->stats.counters.in_bad_rpcs;
+				goto replyerror;
+			}
+		}
+		/* update statistics */
+		session->stats->in_rpcs++;
+		if (nc_info) {
+			pthread_rwlock_wrlock(&(nc_info->lock));
+			nc_info->stats.counters.in_rpcs++;
+			pthread_rwlock_unlock(&(nc_info->lock));
+		}
+
+		/* NACM init */
+		nacm_start(*rpc, session);
+
+		/* NACM - check operation access */
+		if (nacm_check_operation(*rpc) != NACM_PERMIT) {
+			e = nc_err_new(NC_ERR_ACCESS_DENIED);
+			nc_err_set(e, NC_ERR_PARAM_MSG, "Operation not permitted.");
+			counter = &nc_info->stats_nacm.denied_ops;
+			goto replyerror;
+		}
+
+		/* assign operation value */
+		op = nc_rpc_assign_op(*rpc);
+
+		/* set rpc type flag */
+		nc_rpc_parse_type(*rpc);
+
+		/* assign source/target datastore types */
+		if (op == NC_OP_GETCONFIG || op == NC_OP_COPYCONFIG || op == NC_OP_VALIDATE) {
+			nc_rpc_assign_ds(*rpc, "source");
+			if (!(*rpc)->source) {
+				e = nc_err_new(NC_ERR_MISSING_ELEM);
+				nc_err_set(e, NC_ERR_PARAM_TYPE, "protocol");
+				nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "source");
+
+				session->stats->in_bad_rpcs++;
+				counter = &nc_info->stats.counters.in_bad_rpcs;
+				goto replyerror;
+			}
+		}
+		if (op == NC_OP_EDITCONFIG || op == NC_OP_COPYCONFIG || op == NC_OP_COMMIT
+				|| op == NC_OP_DELETECONFIG || op == NC_OP_LOCK || op == NC_OP_UNLOCK) {
+			nc_rpc_assign_ds(*rpc, "target");
+			if (!(*rpc)->target) {
+				e = nc_err_new(NC_ERR_MISSING_ELEM);
+				nc_err_set(e, NC_ERR_PARAM_TYPE, "protocol");
+				nc_err_set(e, NC_ERR_PARAM_INFO_BADELEM, "target");
+
+				session->stats->in_bad_rpcs++;
+				counter = &nc_info->stats.counters.in_bad_rpcs;
+				goto replyerror;
+			}
+		}
+
+		break;
+	case NC_MSG_HELLO:
+		/* do nothing, just return the type */
+		break;
+	case NC_MSG_WOULDBLOCK:
+		if ((timeout == -1) || ((timeout > 0) && ((timeout = timeout - local_timeout) > 0))) {
+			goto try_again;
+		}
+		break;
+	default:
+		ret = NC_MSG_UNKNOWN;
+
+		/* update stats */
+		session->stats->in_bad_rpcs++;
+		if (nc_info) {
+			pthread_rwlock_wrlock(&(nc_info->lock));
+			nc_info->stats.counters.in_bad_rpcs++;
+			pthread_rwlock_unlock(&(nc_info->lock));
+		}
+
+		break;
+	}
+
+	return (ret);
+
+replyerror:
+
+	reply = nc_reply_error(e);
+	if (nc_session_send_reply(session, *rpc, reply) == 0) {
+		ERROR("Failed to send reply.");
+	}
+	nc_rpc_free(*rpc);
+	*rpc = NULL;
+	nc_reply_free(reply);
+	/* update stats */
+	if (nc_info) {
+		pthread_rwlock_wrlock(&(nc_info->lock));
+		(*counter)++;
+		pthread_rwlock_unlock(&(nc_info->lock));
+	}
+}
+
 API NC_MSG_TYPE nc_session_recv_rpc(struct nc_session* session, int timeout, nc_rpc** rpc)
 {
 	NC_MSG_TYPE ret;
@@ -2539,7 +3165,10 @@ API NC_MSG_TYPE nc_session_recv_rpc(struct nc_session* session, int timeout, nc_
 
 try_again:
 	ret = nc_session_receive (session, local_timeout, (struct nc_msg**) rpc);
-	switch (ret) {
+  DBG("%d",ret);
+  DBG("%d",nc_rpc_get_op(rpc));
+
+  switch (ret) {
 	case NC_MSG_RPC:
 		(*rpc)->with_defaults = nc_rpc_parse_withdefaults(*rpc, session);
 
@@ -2703,10 +3332,10 @@ API const nc_msgid nc_session_send_rpc(struct nc_session* session, nc_rpc *rpc)
 	struct nc_msg *msg;
 	NC_OP op;
 
-	if (session == NULL || (session->status != NC_SESSION_STATUS_WORKING && session->status != NC_SESSION_STATUS_CLOSING)) {
+/*	if (session == NULL || (session->status != NC_SESSION_STATUS_WORKING && session->status != NC_SESSION_STATUS_CLOSING)) {
 		ERROR("Invalid session to send <rpc>.");
-		return (NULL); /* failure */
-	}
+		return (NULL); failure 
+	}*/
 
 	if (rpc->type.rpc != NC_RPC_HELLO) {
 		/* check for capabilities operations */
