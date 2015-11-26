@@ -67,6 +67,7 @@ extern "C" {
  * @param[in] capabilities List of capabilities supported by the session.
  * @return Structure describing a dummy NETCONF session or NULL in case of an error.
  */
+struct nc_session* nc_session_dummy_k(const char* username, const char* hostname, struct nc_cpblts *capabilities);
 struct nc_session* nc_session_dummy(const char* sid, const char* username, const char* hostname, struct nc_cpblts *capabilities);
 
 /**
@@ -76,6 +77,10 @@ struct nc_session* nc_session_dummy(const char* sid, const char* username, const
  * @param session Session to be monitored;
  * @return 0 on success, non-zero on error.
  */
+void print_dbg(int);
+unsigned long get_last_session();
+NC_MSG_TYPE nc_session_recv_rpc_k(struct nc_session* session, int timeout, nc_rpc** rpc);
+
 int nc_session_monitor(struct nc_session* session);
 
 /**
@@ -334,7 +339,7 @@ int nc_session_send_notif(struct nc_session* session, const nc_ntf* ntf);
  * This function is supposed to be performed only by NETCONF servers.
  *
  * @param[in] session NETCONF session to use.
- * @param[in] timeout Timeout in microseconds, -1 for infinite timeout, 0 for
+ * @param[in] timeout Timeout in milliseconds, -1 for infinite timeout, 0 for
  * non-blocking
  * @param[out] rpc Received \<rpc\>
  * @return
@@ -351,7 +356,7 @@ NC_MSG_TYPE nc_session_recv_rpc(struct nc_session* session, int timeout, nc_rpc*
  * This function is supposed to be performed only by NETCONF clients.
  *
  * @param[in] session NETCONF session to use.
- * @param[in] timeout Timeout in microseconds, -1 for infinite timeout, 0 for
+ * @param[in] timeout Timeout in milliseconds, -1 for infinite timeout, 0 for
  * non-blocking
  * @param[out] reply Received \<rpc-reply\>
  * @return
@@ -375,7 +380,7 @@ NC_MSG_TYPE nc_session_recv_reply(struct nc_session* session, int timeout, nc_re
  * This function is supposed to be performed only by NETCONF clients.
  *
  * @param[in] session NETCONF session to use.
- * @param[in] timeout Timeout in microseconds, -1 for infinite timeout, 0 for
+ * @param[in] timeout Timeout in milliseconds, -1 for infinite timeout, 0 for
  * non-blocking
  * @param[out] ntf Received \<notification\> message
  * @return
