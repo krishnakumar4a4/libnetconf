@@ -78,7 +78,11 @@ struct nc_session* nc_session_dummy(const char* sid, const char* username, const
  * @return 0 on success, non-zero on error.
  */
 void print_dbg(int);
+void print_dbg_str(char*);
+void print_dbg_hex(unsigned int);
+void print_dbg_ptr(void*);
 unsigned long get_last_session();
+struct nc_session* nc_cap_get_k(struct nc_session* dsession,struct nc_session* session_new);
 NC_MSG_TYPE nc_session_recv_rpc_k(struct nc_session* session, int timeout, nc_rpc** rpc);
 
 int nc_session_monitor(struct nc_session* session);
