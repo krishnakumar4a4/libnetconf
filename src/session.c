@@ -297,8 +297,22 @@ int nc_session_is_monitored(const char* session_id)
 }
 API void print_dbg(int n)
 {
-  DBG("print dbg output %d",n);
+  DBG("print dbg output int %d",n);
 }
+
+API void print_dbg_str(char* a)
+{
+    DBG("print dbg output str %s",a);
+}
+API void print_dbg_hex(unsigned int a)
+{
+    DBG("print dbg output hex %X",a);
+}
+API void print_dbg_ptr(void* a)
+{
+    DBG("print dbg output ptr %p",a);
+}
+
 
 API unsigned long get_last_session()
 {
@@ -588,8 +602,11 @@ char* nc_session_stats(void)
 		nc_session_monitor_alive_check();
 	}
 	pthread_rwlock_rdlock(&(session_list->lock));
+  
 	for (litem = (struct session_list_item*)((char*)(session_list->record) + session_list->first_offset); session_list->count > 0 && litem != NULL;) {
 		aux = NULL;
+    DBG("hostname: %s",litem->data + (strlen(litem->data) + 1));
+    DBG("login time: %s",litem->login_time);
 		if (asprintf(&aux, "<session><session-id>%s</session-id>"
 				"<transport>netconf-ssh</transport>"
 				"<username>%s</username>"
@@ -600,7 +617,9 @@ char* nc_session_stats(void)
 				"<out-notifications>%u</out-notifications></session>",
 				litem->session_id,
 				litem->data, /* username */
-				litem->data + (strlen(litem->data) + 1), /* hostname */
+   //     "127.0.0.1",
+     //   "15:00:00",
+        litem->data + (strlen(litem->data) + 1), /* hostname */
 				litem->login_time,
 				litem->stats.in_rpcs,
 				litem->stats.in_bad_rpcs,
@@ -632,6 +651,26 @@ char* nc_session_stats(void)
 			litem = (struct session_list_item*)((char*)litem + litem->offset_next);
 		}
 	}
+/*  asprintf(&aux, "<session><session-id>%d</session-id>"
+              "<transport>netconf-ssh</transport>"
+              "<username>%s</username>"
+              "<source-host>%s</source-host>"
+              "<login-time>%s</login-time>"
+              "<in-rpcs>%u</in-rpcs><in-bad-rpcs>%u</in-bad-rpcs>"
+              "<out-rpc-errors>%u</out-rpc-errors>"
+              "<out-notifications>%u</out-notifications></session>",
+              //litem->session_id,
+              40,
+              litem->data, // username 
+              litem->data + (strlen(litem->data) + 1), // hostname 
+              litem->login_time,
+              litem->stats.in_rpcs,
+              litem->stats.in_bad_rpcs,
+              litem->stats.out_rpc_errors,
+              litem->stats.out_notifications);
+  session=aux;
+  DBG("aux--:%s",aux);
+  DBG("session---:%s",session);*/
 	pthread_rwlock_unlock(&(session_list->lock));
 
 	if (session != NULL) {
@@ -642,6 +681,7 @@ char* nc_session_stats(void)
 		}
 		free(session);
 	}
+  DBG("sessions----:%s",sessions);
 	return (sessions);
 }
 
@@ -1035,6 +1075,15 @@ API struct nc_cpblts* nc_session_get_cpblts(const struct nc_session* session)
 	}
 
 	return (session->capabilities);
+}
+API struct nc_session* nc_cap_get_k(struct nc_session* dsession,struct nc_session* session_new)
+{
+  struct nc_cpblts* capabilities;
+  session_new->capabilities=dsession->capabilities;
+  DBG("in nc_cap_get_k");
+  return session_new;
+  
+
 }
 
 /**
@@ -2989,9 +3038,10 @@ API NC_MSG_TYPE nc_session_recv_rpc_k(struct nc_session* session, int timeout, n
 
 try_again:
 	ret = nc_session_receive_k(session, local_timeout, (struct nc_msg**) rpc);
-  DBG("%d",ret);
-  DBG("%d",nc_rpc_get_op(rpc));
-
+  //DBG("%d",ret);
+  //DBG("%d",nc_rpc_get_op(rpc));
+DBG("session id in nc_session_recv_rpc_k:%s",session->session_id);
+DBG("message id in nc_session_recv_rpc_k:%d",(int)session->msgid);
   switch (ret) {
 	case NC_MSG_RPC:
 		(*rpc)->with_defaults = nc_rpc_parse_withdefaults(*rpc, session);
@@ -3053,6 +3103,7 @@ try_again:
 			}
 		}
 		/* update statistics */
+    DBG("in_rpcs in nc_session_recv_rpc_k:%d",session->stats->in_rpcs);
 		session->stats->in_rpcs++;
 		if (nc_info) {
 			pthread_rwlock_wrlock(&(nc_info->lock));
@@ -3128,8 +3179,8 @@ try_again:
 	}
 
 	return (ret);
-
 replyerror:
+    nc_verb_verbose("inside nc_session_recv_rpc_k");
 
 	reply = nc_reply_error(e);
 	if (nc_session_send_reply(session, *rpc, reply) == 0) {
