@@ -1,0 +1,2 @@
+xmlReadDoc -> checks for the format of input data,whether xml or not.If yes, returns the nc_msg->doc
+xmlDocGetRootElement -> get root element from the xml
